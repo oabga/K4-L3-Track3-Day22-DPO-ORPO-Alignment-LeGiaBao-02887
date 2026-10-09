@@ -59,8 +59,9 @@ print(f"sum log p = {total.item():.3f}   mean log p = {mean.item():.3f}")
 # %%
 def my_dpo_loss(pc, pr, rc, rr, beta=0.1):
     """pc/pr: policy log-prob chosen/rejected; rc/rr: reference. Trả về loss trung bình."""
-    # TODO: viết bằng torch.nn.functional.logsigmoid
-    return None
+    chosen_reward = beta * (pc - rc)
+    rejected_reward = beta * (pr - rr)
+    return -torch.nn.functional.logsigmoid(chosen_reward - rejected_reward).mean()
 
 
 # %%
@@ -122,6 +123,19 @@ for name, (pc_, pr_) in scenarios.items():
     print(f"{name:28s} RPO loss {M.rpo_loss(pc_, pr_, ref_c, ref_r, nll, beta=1.0).item():.3f}")
 
 # %% [markdown]
+# **Trả lời — vì sao margin có thể tăng trong khi log-prob của `chosen` giảm?**
+#
+# Margin = `(log π(y_w) − log π_ref(y_w)) − (log π(y_l) − log π_ref(y_l))`. DPO chỉ tối ưu *hiệu số* này,
+# không tối ưu riêng từng số hạng. Nếu `rejected` bị đẩy xuống nhanh hơn `chosen` (kịch bản B ở trên:
+# chosen −3, rejected −5), hiệu số vẫn tăng (+2 nat ở cả hai kịch bản) dù log-prob của `chosen` giảm.
+# Về gradient: trọng số cập nhật là `sigmoid(−margin)` (mục 4) — áp dụng *chung* cho cả hướng kéo `chosen`
+# lên và đẩy `rejected` xuống, không có cơ chế nào bắt gradient ưu tiên "kéo chosen lên" hơn "đẩy rejected
+# xuống". Nếu dữ liệu khiến việc đẩy `rejected` xuống dễ hơn (ví dụ `rejected` đã có log-prob thấp, gradient
+# theo hướng đó "rẻ" hơn), mô hình sẽ làm điều dễ hơn — đó chính là **likelihood displacement**. Đây là lý do
+# NB3 phải vẽ riêng `rewards/chosen` và `rewards/rejected`: chỉ nhìn margin (hoặc accuracy) không phân biệt
+# được "đúng kỳ vọng" với "dịch chuyển xác suất".
+
+# %% [markdown]
 # ## 6. Bốn biến thể trên cùng một cặp
 #
 # | Loss | Cần mô hình tham chiếu (reference)? | Chuẩn hoá độ dài? | Ghi chú |
@@ -148,3 +162,13 @@ print(f"ORPO  {M.orpo_loss(avg_c, avg_r, -avg_c).item():.4f}")
 # **Câu hỏi cho REFLECTION §3:** tổng log-prob của câu dài luôn âm hơn câu ngắn.
 # Vì sao điều đó khiến DPO gốc dễ thiên vị độ dài, và SimPO/ORPO xử lý bằng cách nào?
 # Gợi ý: NB2 in ra tỉ lệ cặp có chosen dài hơn rejected trong dữ liệu tiếng Việt.
+#
+# **Trả lời:** `dpo_loss` dùng tổng log-prob (`*_logps`, không chia theo số token). Với cùng một reward
+# ngầm/token, câu *dài hơn* có tổng log-prob *âm hơn* chỉ vì cộng nhiều số hạng âm — nên nếu dữ liệu ưu tiên
+# có `chosen` dài hơn `rejected` một cách hệ thống (xem tỉ lệ ở NB2), mô hình có thể tăng margin bằng cách
+# đơn giản là *sinh câu dài hơn* (mỗi token thêm kéo tổng log-prob xuống chậm hơn việc "nói đúng ý" một cách
+# ngắn gọn), chứ không cần trả lời tốt hơn về nội dung — đây là "length hacking". SimPO và ORPO tránh lỗi này
+# bằng cách dùng log-prob **trung bình theo token** (`*_avg_logps`, ví dụ `avg_c, avg_r` ở trên) thay vì tổng:
+# chia theo độ dài làm margin không còn tự động tăng theo số token nữa, nên phần thưởng phải đến từ xác suất
+# *trung bình mỗi token* cao hơn, không phải từ việc viết dài hơn. IPO cũng chuẩn hoá theo độ dài ở trên cùng
+# lý do, dù vẫn cần reference.
